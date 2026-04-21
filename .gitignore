@@ -49,6 +49,11 @@ cli-config.yaml
 skills/.hub/
 ignored/
 .worktrees/
+
+# Kilo Code: ignore tooling under .kilo/ (node_modules, etc.) but allow linked worktrees
+.kilo/*
+!.kilo/worktrees/
+!.kilo/worktrees/**
 environments/benchmarks/evals/
 
 # Web UI build output

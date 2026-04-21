@@ -3413,8 +3413,9 @@ def _update_via_zip(args):
     import subprocess
     uv_bin = shutil.which("uv")
     if uv_bin:
-        uv_env = {**os.environ, "VIRTUAL_ENV": str(PROJECT_ROOT / "venv")}
-        _install_python_dependencies_with_optional_fallback([uv_bin, "pip"], env=uv_env)
+        _install_python_dependencies_with_optional_fallback(
+            [uv_bin, "pip"], env=_uv_pip_env(PROJECT_ROOT)
+        )
     else:
         # Use sys.executable to explicitly call the venv's pip module,
         # avoiding PEP 668 'externally-managed-environment' errors on Debian/Ubuntu.
@@ -3908,6 +3909,17 @@ def _load_installable_optional_extras() -> list[str]:
     return referenced
 
 
+def _uv_pip_env(project_root: Path) -> dict[str, str]:
+    """Environment for ``uv pip`` during install/update.
+
+    Slow links often hit uv's default 30s timeout while fetching wheels.
+    If the user did not set ``UV_HTTP_TIMEOUT``, use a longer default.
+    """
+    env: dict[str, str] = {**os.environ, "VIRTUAL_ENV": str(project_root / "venv")}
+    if "UV_HTTP_TIMEOUT" not in os.environ:
+        env["UV_HTTP_TIMEOUT"] = "300"
+    return env
+
 
 def _install_python_dependencies_with_optional_fallback(
     install_cmd_prefix: list[str],
@@ -4156,8 +4168,9 @@ def cmd_update(args):
         print("→ Updating Python dependencies...")
         uv_bin = shutil.which("uv")
         if uv_bin:
-            uv_env = {**os.environ, "VIRTUAL_ENV": str(PROJECT_ROOT / "venv")}
-            _install_python_dependencies_with_optional_fallback([uv_bin, "pip"], env=uv_env)
+            _install_python_dependencies_with_optional_fallback(
+                [uv_bin, "pip"], env=_uv_pip_env(PROJECT_ROOT)
+            )
         else:
             # Use sys.executable to explicitly call the venv's pip module,
             # avoiding PEP 668 'externally-managed-environment' errors on Debian/Ubuntu.

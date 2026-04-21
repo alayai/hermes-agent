@@ -515,6 +515,40 @@ class TestInit:
             )
             assert a._use_prompt_caching is False
 
+    def test_custom_provider_root_base_url_auto_normalized_to_v1(self):
+        with (
+            patch("run_agent.get_tool_definitions", return_value=[]),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            a = AIAgent(
+                provider="custom",
+                api_key="test-key-1234567890",
+                model="kimi-k2.5",
+                base_url="http://example.local",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            assert a.base_url == "http://example.local/v1"
+
+    def test_custom_provider_base_url_with_existing_path_not_rewritten(self):
+        with (
+            patch("run_agent.get_tool_definitions", return_value=[]),
+            patch("run_agent.check_toolset_requirements", return_value={}),
+            patch("run_agent.OpenAI"),
+        ):
+            a = AIAgent(
+                provider="custom",
+                api_key="test-key-1234567890",
+                model="kimi-k2.5",
+                base_url="http://example.local/openai/v1",
+                quiet_mode=True,
+                skip_context_files=True,
+                skip_memory=True,
+            )
+            assert a.base_url == "http://example.local/openai/v1"
+
     def test_prompt_caching_native_anthropic(self):
         """Native Anthropic provider should enable prompt caching."""
         with (
@@ -899,6 +933,22 @@ class TestBuildApiKwargs:
         messages = [{"role": "user", "content": "hi"}]
         kwargs = agent._build_api_kwargs(messages)
         assert kwargs["extra_body"]["reasoning"]["effort"] == "medium"
+
+    def test_reasoning_omitted_for_kimi_on_nous_route(self, agent):
+        """Kimi on Nous returns empty content when OpenRouter-style reasoning is forced."""
+        agent.base_url = "https://inference-api.nousresearch.com/v1"
+        agent.model = "moonshotai/kimi-k2.5"
+        messages = [{"role": "user", "content": "hi"}]
+        kwargs = agent._build_api_kwargs(messages)
+        assert "reasoning" not in kwargs.get("extra_body", {})
+        assert kwargs["extra_body"]["tags"] == ["product=hermes-agent"]
+
+    def test_reasoning_omitted_for_bare_kimi_id_on_nous_route(self, agent):
+        agent.base_url = "https://inference-api.nousresearch.com/v1"
+        agent.model = "kimi-k2.5"
+        messages = [{"role": "user", "content": "hi"}]
+        kwargs = agent._build_api_kwargs(messages)
+        assert "reasoning" not in kwargs.get("extra_body", {})
 
     def test_reasoning_sent_for_copilot_gpt5(self, agent):
         agent.base_url = "https://api.githubcopilot.com"

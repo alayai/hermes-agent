@@ -36,6 +36,7 @@ import tempfile
 import time
 import threading
 from types import SimpleNamespace
+from urllib.parse import urlparse
 import uuid
 from typing import List, Dict, Any, Optional
 from openai import OpenAI
@@ -549,6 +550,39 @@ class AIAgent:
         self._base_url = value
         self._base_url_lower = value.lower() if value else ""
 
+    def _normalize_provider_base_url(self, base_url: str, provider: Optional[str] = None) -> str:
+        """Normalize provider base_url quirks before creating API clients.
+
+        For custom OpenAI-compatible endpoints, users frequently paste the root
+        dashboard URL instead of the API root. OpenAI SDK calls then hit
+        `/chat/completions` and may receive HTML/UI responses instead of JSON,
+        which degrades into empty model output loops.
+        """
+        if not isinstance(base_url, str):
+            return base_url
+
+        normalized = base_url.strip().rstrip("/")
+        if not normalized:
+            return normalized
+
+        provider_name = (provider if provider is not None else getattr(self, "provider", "")) or ""
+        provider_name = provider_name.strip().lower()
+        if provider_name != "custom":
+            return normalized
+
+        try:
+            parsed = urlparse(normalized)
+            path = (parsed.path or "").rstrip("/")
+            # OpenAI-compatible custom gateways almost always require an API
+            # prefix (`/v1`). If user entered only origin, append it.
+            if not path:
+                return normalized + "/v1"
+        except Exception:
+            # Fail-open: keep original URL if parsing failed.
+            return normalized
+
+        return normalized
+
     def __init__(
         self,
         base_url: str = None,
@@ -677,10 +711,12 @@ class AIAgent:
         self._credential_pool = credential_pool
         self.log_prefix_chars = log_prefix_chars
         self.log_prefix = f"{log_prefix} " if log_prefix else ""
-        # Store effective base URL for feature detection (prompt caching, reasoning, etc.)
-        self.base_url = base_url or ""
         provider_name = provider.strip().lower() if isinstance(provider, str) and provider.strip() else None
         self.provider = provider_name or ""
+        # Store effective base URL for feature detection (prompt caching,
+        # reasoning, etc.). For custom OpenAI-compatible endpoints, normalize
+        # root origins to API roots (append /v1 when missing path).
+        self.base_url = self._normalize_provider_base_url(base_url or "", self.provider)
         self.acp_command = acp_command or command
         self.acp_args = list(acp_args or args or [])
         if api_mode in {"chat_completions", "codex_responses", "anthropic_messages", "bedrock_converse"}:
@@ -1044,7 +1080,14 @@ class AIAgent:
                     client_kwargs["default_headers"] = headers
 
             self.api_key = client_kwargs.get("api_key", "")
-            self.base_url = client_kwargs.get("base_url", self.base_url)
+            normalized_base_url = self._normalize_provider_base_url(
+                client_kwargs.get("base_url", self.base_url),
+                self.provider,
+            )
+            self.base_url = normalized_base_url
+            if isinstance(normalized_base_url, str) and normalized_base_url:
+                client_kwargs["base_url"] = normalized_base_url
+                self._client_kwargs["base_url"] = normalized_base_url
             try:
                 self.client = self._create_openai_client(client_kwargs, reason="agent_init", shared=True)
                 if not self.quiet_mode:
@@ -1686,7 +1729,10 @@ class AIAgent:
         # ── Swap core runtime fields ──
         self.model = new_model
         self.provider = new_provider
-        self.base_url = base_url or self.base_url
+        self.base_url = self._normalize_provider_base_url(
+            base_url or self.base_url,
+            self.provider,
+        )
         self.api_mode = api_mode
         if api_key:
             self.api_key = api_key
@@ -4810,7 +4856,7 @@ class AIAgent:
             return False
 
         self.api_key = api_key.strip()
-        self.base_url = base_url.strip().rstrip("/")
+        self.base_url = self._normalize_provider_base_url(base_url, self.provider)
         self._client_kwargs["api_key"] = self.api_key
         self._client_kwargs["base_url"] = self.base_url
 
@@ -4843,7 +4889,7 @@ class AIAgent:
             return False
 
         self.api_key = api_key.strip()
-        self.base_url = base_url.strip().rstrip("/")
+        self.base_url = self._normalize_provider_base_url(base_url, self.provider)
         self._client_kwargs["api_key"] = self.api_key
         self._client_kwargs["base_url"] = self.base_url
         # Nous requests should not inherit OpenRouter-only attribution headers.
@@ -4931,7 +4977,7 @@ class AIAgent:
             return
 
         self.api_key = runtime_key
-        self.base_url = runtime_base.rstrip("/") if isinstance(runtime_base, str) else runtime_base
+        self.base_url = self._normalize_provider_base_url(runtime_base, self.provider)
         self._client_kwargs["api_key"] = self.api_key
         self._client_kwargs["base_url"] = self.base_url
         self._apply_client_headers_for_base_url(self.base_url)
@@ -5999,7 +6045,7 @@ class AIAgent:
             old_model = self.model
             self.model = fb_model
             self.provider = fb_provider
-            self.base_url = fb_base_url
+            self.base_url = self._normalize_provider_base_url(fb_base_url, self.provider)
             self.api_mode = fb_api_mode
             self._fallback_activated = True
 
@@ -6094,7 +6140,7 @@ class AIAgent:
             # ── Core runtime state ──
             self.model = rt["model"]
             self.provider = rt["provider"]
-            self.base_url = rt["base_url"]           # setter updates _base_url_lower
+            self.base_url = self._normalize_provider_base_url(rt["base_url"], self.provider)
             self.api_mode = rt["api_mode"]
             self.api_key = rt["api_key"]
             self._client_kwargs = dict(rt["client_kwargs"])
@@ -6193,7 +6239,7 @@ class AIAgent:
             self._client_kwargs = dict(rt["client_kwargs"])
             self.model = rt["model"]
             self.provider = rt["provider"]
-            self.base_url = rt["base_url"]
+            self.base_url = self._normalize_provider_base_url(rt["base_url"], self.provider)
             self.api_mode = rt["api_mode"]
             self.api_key = rt["api_key"]
 
@@ -6764,6 +6810,13 @@ class AIAgent:
         known reasoning-capable model families and direct Nous Portal.
         """
         if "nousresearch" in self._base_url_lower:
+            # OpenRouter-style `reasoning` in extra_body is honored for most Nous
+            # routes, but Moonshot Kimi models return *empty* assistant `content`
+            # when it is set — output budget goes to an internal channel that is
+            # not mapped back to `reasoning` / visible text on chat.completions.
+            ml = (self.model or "").lower()
+            if ml.startswith("moonshotai/kimi") or ml.startswith("kimi-"):
+                return False
             return True
         if "ai-gateway.vercel.sh" in self._base_url_lower:
             return True
